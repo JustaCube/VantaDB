@@ -48,7 +48,7 @@ pub async fn start(
     let acl_manager = AclManager::new(Arc::clone(&engine))?;
 
     // Use config values for subsystem initialization
-    let jwt_manager = Arc::new(JwtSessionManager::new(config.auth.jwt_ttl_hours));
+    let jwt_manager = Arc::new(JwtSessionManager::open(Arc::clone(&engine), config.auth.jwt_ttl_hours)?);
     let auth_manager = Arc::new(auth);
     let db_manager = Arc::new(db_manager);
     let cert_manager = Arc::new(cert_manager);

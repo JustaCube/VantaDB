@@ -104,6 +104,11 @@ fn main() {
         cfg.server.tls = false;
     }
 
+    if let Err(error) = cfg.validate() {
+        eprintln!("  invalid configuration: {}", error);
+        process::exit(1);
+    }
+
     if cli.dump_config {
         print!("{}", cfg.dump());
         return;

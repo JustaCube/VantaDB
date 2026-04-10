@@ -178,6 +178,57 @@ impl Config {
             .map_err(|e| format!("parse error: {}", e))
     }
 
+    pub fn validate(&self) -> Result<(), String> {
+        if self.server.port == 0 {
+            return Err("server.port must be between 1 and 65535".to_string());
+        }
+        if self.server.data_dir.trim().is_empty() {
+            return Err("server.data_dir cannot be empty".to_string());
+        }
+        if self.auth.jwt_ttl_hours <= 0 {
+            return Err("auth.jwt_ttl_hours must be greater than 0".to_string());
+        }
+        if self.auth.jwt_ttl_hours > 24 * 30 {
+            return Err("auth.jwt_ttl_hours must be 720 hours or less".to_string());
+        }
+        if self.auth.password_min_length < 12 {
+            return Err("auth.password_min_length must be at least 12".to_string());
+        }
+        if self.auth.lockout_max_attempts == 0 {
+            return Err("auth.lockout_max_attempts must be greater than 0".to_string());
+        }
+        if self.auth.lockout_window_secs == 0 {
+            return Err("auth.lockout_window_secs must be greater than 0".to_string());
+        }
+        if self.auth.lockout_duration_secs == 0 {
+            return Err("auth.lockout_duration_secs must be greater than 0".to_string());
+        }
+        if self.rate_limit.global_rps <= 0.0 {
+            return Err("rate_limit.global_rps must be greater than 0".to_string());
+        }
+        if self.rate_limit.per_ip_rps <= 0.0 {
+            return Err("rate_limit.per_ip_rps must be greater than 0".to_string());
+        }
+        if self.scheduler.reap_interval_secs == 0
+            || self.scheduler.gc_interval_secs == 0
+            || self.scheduler.compact_interval_secs == 0
+        {
+            return Err("scheduler intervals must all be greater than 0".to_string());
+        }
+        if self.changefeed.buffer_size == 0 {
+            return Err("changefeed.buffer_size must be greater than 0".to_string());
+        }
+        if let Some(cluster) = &self.cluster {
+            if cluster.node_id == 0 {
+                return Err("cluster.node_id must be greater than 0".to_string());
+            }
+            if cluster.advertise_addr.trim().is_empty() {
+                return Err("cluster.advertise_addr cannot be empty".to_string());
+            }
+        }
+        Ok(())
+    }
+
     /// Dump config as TOML string.
     pub fn dump(&self) -> String {
         let mut out = String::new();
@@ -258,5 +309,16 @@ jwt_ttl_hours = 48
         assert!(dumped.contains("port = 5432"));
         assert!(dumped.contains("jwt_ttl_hours = 24"));
         assert!(dumped.contains("buffer_size = 10000"));
+    }
+
+    #[test]
+    fn test_validate_rejects_insecure_values() {
+        let mut config = Config::default();
+        config.auth.jwt_ttl_hours = 0;
+        assert!(config.validate().is_err());
+
+        let mut config = Config::default();
+        config.auth.password_min_length = 8;
+        assert!(config.validate().is_err());
     }
 }

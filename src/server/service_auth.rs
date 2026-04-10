@@ -17,6 +17,7 @@ impl proto::vanta_auth_server::VantaAuth for VantaAuthServiceImpl {
         let start = Instant::now();
         self.metrics.inc("auth_attempts");
         if !self.global_auth_limiter.allow() {
+            self.metrics.inc("auth_failures");
             return Err(Status::resource_exhausted("Rate limit exceeded, try again later"));
         }
 
@@ -25,6 +26,7 @@ impl proto::vanta_auth_server::VantaAuth for VantaAuthServiceImpl {
             .unwrap_or_else(|| "unknown".to_string());
 
         if !self.ip_auth_limiter.allow(&peer_ip) {
+            self.metrics.inc("auth_failures");
             return Err(Status::resource_exhausted("Too many auth attempts from this address"));
         }
 
@@ -32,6 +34,11 @@ impl proto::vanta_auth_server::VantaAuth for VantaAuthServiceImpl {
         let username = req.username;
 
         if let Some(remaining) = self.lockout_tracker.check(&username) {
+            self.metrics.inc("auth_failures");
+            self.audit_logger.record(
+                &username, "", "authenticate",
+                None, None, "{}", false, Some("Account locked"),
+            );
             return Ok(Response::new(proto::AuthResponse {
                 success: false,
                 token: String::new(),
@@ -102,6 +109,7 @@ impl proto::vanta_auth_server::VantaAuth for VantaAuthServiceImpl {
         let username = req.username;
         let password = req.password;
         let databases = req.databases;
+        let audit_username = username.clone();
 
         let result = tokio::task::spawn_blocking(move || {
             auth.create_user(&username, &password, role, databases)
@@ -110,8 +118,14 @@ impl proto::vanta_auth_server::VantaAuth for VantaAuthServiceImpl {
         .map_err(|e| Status::internal(e.to_string()))?;
 
         match result {
-            Ok(Ok(())) => ok_status(),
-            Ok(Err(e)) => err_status(e),
+            Ok(Ok(())) => {
+                self.audit_logger.record(&ctx.username, &ctx.role.to_string(), "create_user", None, None, &format!("{{\"username\":\"{}\"}}", audit_username), true, None);
+                ok_status()
+            }
+            Ok(Err(e)) => {
+                self.audit_logger.record(&ctx.username, &ctx.role.to_string(), "create_user", None, None, &format!("{{\"username\":\"{}\"}}", audit_username), false, Some(&e));
+                err_status(e)
+            }
             Err(e) => Err(Status::internal(e.to_string())),
         }
     }
@@ -128,14 +142,21 @@ impl proto::vanta_auth_server::VantaAuth for VantaAuthServiceImpl {
         let req = request.into_inner();
         let auth = Arc::clone(&self.auth_manager);
         let username = req.username;
+        let audit_username = username.clone();
 
         let result = tokio::task::spawn_blocking(move || auth.delete_user(&username))
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
         match result {
-            Ok(Ok(())) => ok_status(),
-            Ok(Err(e)) => err_status(e),
+            Ok(Ok(())) => {
+                self.audit_logger.record(&ctx.username, &ctx.role.to_string(), "delete_user", None, None, &format!("{{\"username\":\"{}\"}}", audit_username), true, None);
+                ok_status()
+            }
+            Ok(Err(e)) => {
+                self.audit_logger.record(&ctx.username, &ctx.role.to_string(), "delete_user", None, None, &format!("{{\"username\":\"{}\"}}", audit_username), false, Some(&e));
+                err_status(e)
+            }
             Err(e) => Err(Status::internal(e.to_string())),
         }
     }
@@ -154,14 +175,21 @@ impl proto::vanta_auth_server::VantaAuth for VantaAuthServiceImpl {
         let auth = Arc::clone(&self.auth_manager);
         let username = req.username;
         let password = req.password;
+        let audit_username = username.clone();
 
         let result = tokio::task::spawn_blocking(move || auth.set_password(&username, &password))
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
         match result {
-            Ok(Ok(())) => ok_status(),
-            Ok(Err(e)) => err_status(e),
+            Ok(Ok(())) => {
+                self.audit_logger.record(&ctx.username, &ctx.role.to_string(), "set_password", None, None, &format!("{{\"username\":\"{}\"}}", audit_username), true, None);
+                ok_status()
+            }
+            Ok(Err(e)) => {
+                self.audit_logger.record(&ctx.username, &ctx.role.to_string(), "set_password", None, None, &format!("{{\"username\":\"{}\"}}", audit_username), false, Some(&e));
+                err_status(e)
+            }
             Err(e) => Err(Status::internal(e.to_string())),
         }
     }
@@ -232,6 +260,7 @@ impl proto::vanta_auth_server::VantaAuth for VantaAuthServiceImpl {
         let req = request.into_inner();
         let cm = Arc::clone(&self.cert_manager);
         let username = req.username;
+        let audit_username = username.clone();
 
         let result = tokio::task::spawn_blocking(move || cm.issue_cert(&username))
             .await
@@ -239,15 +268,20 @@ impl proto::vanta_auth_server::VantaAuth for VantaAuthServiceImpl {
 
         match result {
             Ok((cert_pem, key_pem, serial)) => {
+                self.audit_logger.record(&ctx.username, &ctx.role.to_string(), "issue_cert", None, None, &format!("{{\"username\":\"{}\",\"serial\":\"{}\"}}", audit_username, serial), true, None);
                 let ca_pem = self.cert_manager.ca_cert_pem().to_string();
                 Ok(Response::new(proto::IssueCertResponse {
                     success: true, cert_pem, key_pem, ca_pem, serial, error: String::new(),
                 }))
             }
-            Err(e) => Ok(Response::new(proto::IssueCertResponse {
-                success: false, cert_pem: String::new(), key_pem: String::new(),
-                ca_pem: String::new(), serial: String::new(), error: e.to_string(),
-            })),
+            Err(e) => {
+                let error = e.to_string();
+                self.audit_logger.record(&ctx.username, &ctx.role.to_string(), "issue_cert", None, None, &format!("{{\"username\":\"{}\"}}", audit_username), false, Some(&error));
+                Ok(Response::new(proto::IssueCertResponse {
+                    success: false, cert_pem: String::new(), key_pem: String::new(),
+                    ca_pem: String::new(), serial: String::new(), error,
+                }))
+            }
         }
     }
 
@@ -263,14 +297,22 @@ impl proto::vanta_auth_server::VantaAuth for VantaAuthServiceImpl {
         let req = request.into_inner();
         let cm = Arc::clone(&self.cert_manager);
         let serial = req.serial;
+        let audit_serial = serial.clone();
 
         let result = tokio::task::spawn_blocking(move || cm.revoke_cert(&serial))
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
         match result {
-            Ok(true) => ok_status(),
-            Ok(false) => err_status("Certificate not found".to_string()),
+            Ok(true) => {
+                self.audit_logger.record(&ctx.username, &ctx.role.to_string(), "revoke_cert", None, None, &format!("{{\"serial\":\"{}\"}}", audit_serial), true, None);
+                ok_status()
+            }
+            Ok(false) => {
+                let error = "Certificate not found".to_string();
+                self.audit_logger.record(&ctx.username, &ctx.role.to_string(), "revoke_cert", None, None, &format!("{{\"serial\":\"{}\"}}", audit_serial), false, Some(&error));
+                err_status(error)
+            }
             Err(e) => Err(Status::internal(e.to_string())),
         }
     }
@@ -324,6 +366,10 @@ impl proto::vanta_auth_server::VantaAuth for VantaAuthServiceImpl {
         let username = req.username;
         let database = req.database;
         let collection = req.collection;
+        let permission_string = req.permission;
+        let audit_username = username.clone();
+        let audit_database = database.clone();
+        let audit_collection = collection.clone();
 
         let result = tokio::task::spawn_blocking(move || {
             if collection.is_empty() {
@@ -336,6 +382,7 @@ impl proto::vanta_auth_server::VantaAuth for VantaAuthServiceImpl {
         .map_err(|e| Status::internal(e.to_string()))?;
 
         result.map_err(|e| Status::internal(e.to_string()))?;
+        self.audit_logger.record(&ctx.username, &ctx.role.to_string(), "set_acl", Some(&audit_database), if audit_collection.is_empty() { None } else { Some(&audit_collection) }, &format!("{{\"username\":\"{}\",\"permission\":\"{}\"}}", audit_username, permission_string), true, None);
         ok_status()
     }
 
@@ -389,12 +436,14 @@ impl proto::vanta_auth_server::VantaAuth for VantaAuthServiceImpl {
         let req = request.into_inner();
         let acl = Arc::clone(&self.acl_manager);
         let username = req.username;
+        let audit_username = username.clone();
 
         tokio::task::spawn_blocking(move || acl.delete_user_acl(&username))
             .await
             .map_err(|e| Status::internal(e.to_string()))?
             .map_err(|e| Status::internal(e.to_string()))?;
 
+        self.audit_logger.record(&ctx.username, &ctx.role.to_string(), "delete_acl", None, None, &format!("{{\"username\":\"{}\"}}", audit_username), true, None);
         ok_status()
     }
 
@@ -497,15 +546,22 @@ impl proto::vanta_auth_server::VantaAuth for VantaAuthServiceImpl {
         .map_err(|e| Status::internal(e.to_string()))?;
 
         match result {
-            Ok(info) => Ok(Response::new(proto::BackupResponse {
-                success: true, path: info.path, size_bytes: info.size_bytes,
-                database_count: info.database_count as u64, document_count: info.document_count as u64,
-                timestamp: info.timestamp, error: String::new(),
-            })),
-            Err(e) => Ok(Response::new(proto::BackupResponse {
-                success: false, path: String::new(), size_bytes: 0,
-                database_count: 0, document_count: 0, timestamp: String::new(), error: e.to_string(),
-            })),
+            Ok(info) => {
+                self.audit_logger.record(&ctx.username, &ctx.role.to_string(), "create_backup", None, None, &format!("{{\"path\":\"{}\"}}", info.path), true, None);
+                Ok(Response::new(proto::BackupResponse {
+                    success: true, path: info.path, size_bytes: info.size_bytes,
+                    database_count: info.database_count as u64, document_count: info.document_count as u64,
+                    timestamp: info.timestamp, error: String::new(),
+                }))
+            }
+            Err(e) => {
+                let error = e.to_string();
+                self.audit_logger.record(&ctx.username, &ctx.role.to_string(), "create_backup", None, None, "{}", false, Some(&error));
+                Ok(Response::new(proto::BackupResponse {
+                    success: false, path: String::new(), size_bytes: 0,
+                    database_count: 0, document_count: 0, timestamp: String::new(), error,
+                }))
+            }
         }
     }
 
@@ -545,6 +601,7 @@ impl proto::vanta_auth_server::VantaAuth for VantaAuthServiceImpl {
         let req = request.into_inner();
         let mgr = Arc::clone(&self.db_manager);
         let path = req.path;
+        let audit_path = path.clone();
 
         tokio::task::spawn_blocking(move || {
             crate::db::backup::restore_backup(&mgr, &path)
@@ -553,6 +610,7 @@ impl proto::vanta_auth_server::VantaAuth for VantaAuthServiceImpl {
         .map_err(|e| Status::internal(e.to_string()))?
         .map_err(|e| Status::internal(e.to_string()))?;
 
+        self.audit_logger.record(&ctx.username, &ctx.role.to_string(), "restore_backup", None, None, &format!("{{\"path\":\"{}\"}}", audit_path), true, None);
         ok_status()
     }
 
