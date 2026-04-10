@@ -81,6 +81,10 @@ struct Cli {
     #[arg(long = "dump-config")]
     dump_config: bool,
 
+    /// Reset the root password locally and print the new generated password
+    #[arg(long = "reset-root-password")]
+    reset_root_password: bool,
+
     /// Join an existing cluster (address of any cluster node)
     #[arg(long)]
     join: Option<String>,
@@ -111,6 +115,11 @@ fn main() {
 
     if cli.dump_config {
         print!("{}", cfg.dump());
+        return;
+    }
+
+    if cli.reset_root_password {
+        reset_root_password();
         return;
     }
 
@@ -324,5 +333,44 @@ fn run_benchmark() {
             e.to_string().red()
         );
         process::exit(1);
+    }
+}
+
+fn reset_root_password() {
+    let data_dir = Shell::data_dir();
+    let system_dir = data_dir.join("system");
+    let auth = match auth::AuthManager::new(storage::StorageEngine::open(&system_dir).unwrap_or_else(|e| {
+        eprintln!(
+            "  {} Failed to open auth store: {}",
+            "✗".red().bold(),
+            e.to_string().red()
+        );
+        process::exit(1);
+    })) {
+        Ok(auth) => auth,
+        Err(error) => {
+            eprintln!(
+                "  {} Failed to initialize auth manager: {}",
+                "✗".red().bold(),
+                error.to_string().red()
+            );
+            process::exit(1);
+        }
+    };
+
+    match auth.reset_password_random("root", 32) {
+        Ok(Ok(password)) => {
+            println!();
+            println!("  New root password: {}", password);
+            println!();
+        }
+        Ok(Err(error)) => {
+            eprintln!("  {} {}", "✗".red().bold(), error.red());
+            process::exit(1);
+        }
+        Err(error) => {
+            eprintln!("  {} Failed to reset password: {}", "✗".red().bold(), error.to_string().red());
+            process::exit(1);
+        }
     }
 }

@@ -248,6 +248,14 @@ impl AuthManager {
         self.save_user(&user)?;
         Ok(Ok(()))
     }
+
+    pub fn reset_password_random(&self, username: &str, len: usize) -> io::Result<Result<String, String>> {
+        let password = generate_random_password(len.max(MIN_PASSWORD_LENGTH));
+        match self.set_password(username, &password)? {
+            Ok(()) => Ok(Ok(password)),
+            Err(err) => Ok(Err(err)),
+        }
+    }
 }
 
 fn generate_random_password(len: usize) -> String {

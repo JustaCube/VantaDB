@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::storage::{StorageEngine, Table};
+use crate::storage::{StorageEngine, SyncPolicy, Table};
 
 // ─────────────────────────────────────────────────────────
 // Latency collector — samples per-op latencies for percentile analysis
@@ -574,44 +574,52 @@ pub fn run_benchmark(data_dir: &Path) -> io::Result<()> {
             "Batch insert...".dimmed()
         );
         let mem_before = get_rss_bytes();
-        let engine = StorageEngine::open(&bench_dir.join("t4"))?;
+        let engine = StorageEngine::open_with_sync_policy(&bench_dir.join("t4"), SyncPolicy::FlushOnly)?;
         let count = 200_000u64;
         engine.create_table_with_capacity("bench", count as usize)?;
-        let table = engine.table_handle("bench").unwrap();
 
         let doc_bytes = serde_json::to_vec(&make_doc(0)).unwrap();
         let doc_size = doc_bytes.len() as u64;
+        let batch_size = 512usize;
 
         let ops_per_thread = count / num_threads as u64;
-        let mut thread_keys: Vec<Option<Vec<String>>> = (0..num_threads)
-            .map(|t| {
-                Some(
-                    (0..ops_per_thread)
-                        .map(|i| format!("key_{}_{}", t, i))
-                        .collect(),
-                )
-            })
-            .collect();
 
         let start = Instant::now();
         let collectors: Vec<LatencyCollector> = std::thread::scope(|s| {
             let mut handles = Vec::new();
             for t in 0..num_threads {
-                let table = &table;
-                let raw = doc_bytes.as_slice();
-                let keys = thread_keys[t].take().unwrap();
+                let engine = engine.clone();
+                let raw = doc_bytes.clone();
                 handles.push(s.spawn(move || {
-                    let doc: Arc<[u8]> = Arc::from(raw);
                     let mut lc = LatencyCollector::with_capacity(
-                        (ops_per_thread / LATENCY_SAMPLE_RATE) as usize + 1,
+                        (ops_per_thread / batch_size as u64) as usize + 1,
                     );
-                    for (i, key) in keys.into_iter().enumerate() {
-                        let op_start = Instant::now();
-                        table.insert(key, Arc::clone(&doc));
-                        if i as u64 % LATENCY_SAMPLE_RATE == 0 {
-                            lc.record(op_start.elapsed().as_nanos() as u64);
+                    let mut batch = Vec::with_capacity(batch_size);
+
+                    for i in 0..ops_per_thread {
+                        batch.push((format!("key_{}_{}", t, i), raw.clone()));
+                        if batch.len() == batch_size {
+                            let op_start = Instant::now();
+                            let batch_len = batch.len() as u64;
+                            engine.put_batch("bench", &batch).unwrap();
+                            let per_item_ns = (op_start.elapsed().as_nanos() as u64 / batch_len.max(1)).max(1);
+                            for _ in 0..batch_len {
+                                lc.record(per_item_ns);
+                            }
+                            batch.clear();
                         }
                     }
+
+                    if !batch.is_empty() {
+                        let op_start = Instant::now();
+                        let batch_len = batch.len() as u64;
+                        engine.put_batch("bench", &batch).unwrap();
+                        let per_item_ns = (op_start.elapsed().as_nanos() as u64 / batch_len.max(1)).max(1);
+                        for _ in 0..batch_len {
+                            lc.record(per_item_ns);
+                        }
+                    }
+
                     lc
                 }));
             }

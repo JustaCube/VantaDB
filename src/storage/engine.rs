@@ -25,6 +25,12 @@ const WAL_OP_DELETE: u8 = 0x02;
 /// Type alias for a single table: 256-shard DashMap with ahash.
 pub type Table = DashMap<String, Arc<[u8]>, RandomState>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncPolicy {
+    Always,
+    FlushOnly,
+}
+
 /// An immutable, lock-free snapshot of a table for maximum read throughput.
 /// No locks, no atomics, no contention — just pure HashMap::get() with ahash.
 pub struct ReadSnapshot {
@@ -94,6 +100,7 @@ pub struct StorageEngine {
     base_path: PathBuf,
     tables: Arc<DashMap<String, Arc<Table>, RandomState>>,
     wal_writers: Arc<DashMap<String, Arc<Mutex<BufWriter<File>>>, RandomState>>,
+    sync_policy: SyncPolicy,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -111,11 +118,16 @@ struct StorageMetadata {
 
 impl StorageEngine {
     pub fn open(base_path: &Path) -> io::Result<Self> {
+        Self::open_with_sync_policy(base_path, SyncPolicy::Always)
+    }
+
+    pub fn open_with_sync_policy(base_path: &Path, sync_policy: SyncPolicy) -> io::Result<Self> {
         fs::create_dir_all(base_path)?;
         let engine = Self {
             base_path: base_path.to_path_buf(),
             tables: Arc::new(new_map()),
             wal_writers: Arc::new(new_map()),
+            sync_policy,
         };
         engine.init_metadata()?;
         engine.load_all()?;
@@ -367,7 +379,9 @@ impl StorageEngine {
         let mut w = writer.lock();
         w.write_all(&buf)?;
         w.flush()?;
-        w.get_ref().sync_data()?;
+        if self.sync_policy == SyncPolicy::Always {
+            w.get_ref().sync_data()?;
+        }
         Ok(())
     }
 
@@ -380,7 +394,9 @@ impl StorageEngine {
         let mut w = writer.lock();
         w.write_all(&buf)?;
         w.flush()?;
-        w.get_ref().sync_data()?;
+        if self.sync_policy == SyncPolicy::Always {
+            w.get_ref().sync_data()?;
+        }
         Ok(())
     }
 
@@ -398,7 +414,9 @@ impl StorageEngine {
         if let Some(writer) = self.wal_writers.get(table) {
             let mut w = writer.lock();
             w.flush()?;
-            w.get_ref().sync_data()?;
+            if self.sync_policy == SyncPolicy::Always {
+                w.get_ref().sync_data()?;
+            }
         }
 
         if let Some(map_ref) = self.tables.get(table) {
@@ -626,7 +644,9 @@ impl StorageEngine {
         if let Err(err) = (|| -> io::Result<()> {
             w.write_all(&buf)?;
             w.flush()?;
-            w.get_ref().sync_data()?;
+            if self.sync_policy == SyncPolicy::Always {
+                w.get_ref().sync_data()?;
+            }
             Ok(())
         })() {
             for (key, old_value) in previous.into_iter().rev() {
