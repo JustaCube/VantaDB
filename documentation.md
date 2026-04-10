@@ -35,15 +35,8 @@ VantaDB is a high-performance document database engine written in Rust. It store
 ### Prerequisites
 
 - **Rust toolchain** (1.70+): Install via [rustup](https://rustup.rs/)
-- **Protobuf compiler** (`protoc`): Required for gRPC code generation
 
-```bash
-# Ubuntu / Debian
-sudo apt update && sudo apt install -y protobuf-compiler
-
-# macOS
-brew install protobuf
-```
+VantaDB now vendors `protoc` during the build, so you do not need to install a system protobuf compiler just to build or test the project.
 
 ### Build from Source
 
@@ -894,6 +887,40 @@ VantaDB uses a custom storage engine with:
 - **Memory-mapped I/O**: Efficient disk access via `memmap2`
 - **mimalloc**: High-performance memory allocator
 - **Argon2**: Password hashing for authentication
+
+### Durable Storage Guarantees
+
+At the current Phase 1 baseline, the storage layer provides these guarantees for the single-node engine:
+
+- WAL records include CRC32C checksums
+- WAL replay stops safely at the first corrupt or torn record
+- Snapshot compaction uses temp-file plus rename semantics
+- Storage metadata is written to disk as a versioned manifest
+- Failed WAL appends roll back in-memory mutations instead of leaving the process in a divergent state
+- Restart recovery rebuilds state from snapshots plus WAL replay
+- MVCC version clock state is persisted so version numbers remain monotonic across restart
+
+Current limitations:
+
+- The engine is still a single-node durability baseline, not a finished production storage architecture
+- Secondary indexes are not yet durable standalone on-disk index structures
+- MVCC history beyond the latest persisted state is not a full long-lived on-disk MVCC archive
+
+### Recovery Testing
+
+The codebase now includes storage-focused tests for:
+
+- metadata manifest creation
+- rollback on WAL-open failure
+- rollback on compaction failure
+- restart recovery from snapshot plus WAL
+- MVCC clock persistence across restart
+
+Run the full suite with:
+
+```bash
+cargo test
+```
 
 ### Backup
 
