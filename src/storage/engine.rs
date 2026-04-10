@@ -344,7 +344,10 @@ impl StorageEngine {
             fs::write(&tmp_path, &data)?;
 
             // 3. Fsync the temp file
-            let f = File::open(&tmp_path)?;
+            let f = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&tmp_path)?;
             f.sync_all()?;
 
             // 4. Atomic rename
