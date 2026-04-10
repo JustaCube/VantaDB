@@ -18,6 +18,7 @@ struct LatencyCollector {
 }
 
 impl LatencyCollector {
+    #[allow(dead_code)]
     fn new() -> Self {
         Self {
             samples: Vec::new(),
@@ -919,7 +920,7 @@ pub fn run_benchmark(data_dir: &Path) -> io::Result<()> {
         let (thread_bytes, collectors): (Vec<u64>, Vec<LatencyCollector>) =
             std::thread::scope(|s| {
                 let mut handles = Vec::new();
-                for t in 0..num_threads {
+                for _t in 0..num_threads {
                     let doc = Arc::clone(&doc);
                     handles.push(s.spawn(move || {
                         let mut bytes = 0u64;

@@ -44,6 +44,7 @@ impl LeaseTracker {
     }
 
     /// Get a handle for external updates.
+    #[allow(dead_code)]
     pub fn handle(&self) -> Arc<RwLock<Instant>> {
         Arc::clone(&self.valid_until)
     }

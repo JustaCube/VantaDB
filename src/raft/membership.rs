@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::{fs, io};
 
 use openraft::BasicNode;
@@ -58,6 +58,7 @@ impl ClusterMembership {
 
 /// Info about a single node in the cluster.
 #[derive(Debug, Clone, Serialize)]
+#[allow(dead_code)]
 pub struct NodeInfo {
     pub node_id: u64,
     pub addr: String,

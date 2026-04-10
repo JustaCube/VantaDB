@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use openraft::error::{RPCError, RaftError, InstallSnapshotError, Unreachable};
 use openraft::network::RPCOption;
 use openraft::raft::{

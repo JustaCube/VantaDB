@@ -15,6 +15,7 @@ use super::filter::matches_filter;
 ///   $count   - count documents into a named field
 ///   $unwind  - expand array field into multiple docs
 ///   $lookup  - cross-collection join
+#[allow(dead_code)]
 pub fn execute_pipeline(
     docs: Vec<Value>,
     pipeline: &[Value],

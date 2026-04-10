@@ -1,5 +1,4 @@
 use dashmap::DashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 /// Token-bucket rate limiter with per-key tracking.

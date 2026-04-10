@@ -37,6 +37,7 @@ impl ReadSnapshot {
         self.data.get(key)
     }
 
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.data.len()
     }
@@ -551,6 +552,7 @@ impl StorageEngine {
         self.tables.iter().map(|e| e.key().clone()).collect()
     }
 
+    #[allow(dead_code)]
     pub fn count(&self, table: &str) -> usize {
         self.tables.get(table).map(|m| m.len()).unwrap_or(0)
     }
@@ -576,6 +578,7 @@ impl StorageEngine {
 
     /// Write to memory only (no disk flush).
     #[inline(always)]
+    #[allow(dead_code)]
     pub fn put_memory_only(&self, table: &str, key: &str, value: &[u8]) {
         let t = self.get_or_create_table(table);
         t.insert(key.to_string(), Arc::from(value));
@@ -583,6 +586,7 @@ impl StorageEngine {
 
     /// Delete from memory only (no disk flush).
     #[inline(always)]
+    #[allow(dead_code)]
     pub fn delete_memory_only(&self, table: &str, key: &str) -> bool {
         self.tables
             .get(table)

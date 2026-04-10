@@ -21,6 +21,7 @@ pub enum VantaError {
         errors: Vec<String>,
     },
     /// Insufficient permissions
+    #[allow(dead_code)]
     PermissionDenied {
         required: String,
     },

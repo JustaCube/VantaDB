@@ -10,12 +10,14 @@ use super::membership::ClusterMembership;
 use super::types::{VantaRaft, VantaRaftConfig};
 
 /// gRPC service handler for inter-node Raft communication.
+#[allow(dead_code)]
 pub struct VantaRaftService {
     raft: Arc<VantaRaft>,
     data_dir: PathBuf,
 }
 
 impl VantaRaftService {
+    #[allow(dead_code)]
     pub fn new(raft: Arc<VantaRaft>, data_dir: PathBuf) -> Self {
         Self { raft, data_dir }
     }

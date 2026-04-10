@@ -37,6 +37,7 @@ pub struct VantaDbServiceImpl {
     pub audit_logger: Arc<AuditLogger>,
     pub metrics: Arc<MetricsCollector>,
     pub raft: Option<Arc<VantaRaft>>,
+    #[allow(dead_code)]
     pub forwarder: Option<Arc<LeaderForwarder>>,
     pub lease: Option<Arc<LeaseTracker>>,
 }

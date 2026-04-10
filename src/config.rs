@@ -1,6 +1,6 @@
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
-use std::{fs, io};
+use std::fs;
 
 /// VantaDB configuration, loaded from TOML file with sensible defaults.
 #[derive(Debug, Clone, Deserialize)]
@@ -15,6 +15,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct ClusterConfig {
     pub node_id: u64,
     pub advertise_addr: String,

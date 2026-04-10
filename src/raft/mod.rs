@@ -7,10 +7,14 @@ pub mod state_machine;
 pub mod storage;
 pub mod types;
 
+#[allow(unused_imports)]
 pub use forwarder::LeaderForwarder;
 pub use lease::{LeaseTracker, ReadConsistency};
+#[allow(unused_imports)]
 pub use membership::ClusterMembership;
+#[allow(unused_imports)]
 pub use network::VantaNetworkFactory;
+#[allow(unused_imports)]
 pub use proto_service::VantaRaftService;
 pub use state_machine::VantaStateMachine;
 pub use storage::VantaLogStore;

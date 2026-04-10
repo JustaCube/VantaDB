@@ -12,10 +12,6 @@ pub mod schema;
 pub mod transaction;
 pub mod tx_ops;
 
-pub use changefeed::ChangeFeed;
 pub use database::{DatabaseManager, QueryOptions};
 pub use error::VantaError;
-pub use filter::matches_filter;
-pub use index::{IndexDef, IndexType};
 pub use schema::CollectionSchema;
-pub use transaction::{TransactionManager, TransactionOp};

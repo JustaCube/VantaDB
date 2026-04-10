@@ -1,8 +1,8 @@
 use chrono::Utc;
 use serde_json::Value;
 use std::fs;
-use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::io::Write;
+use std::path::Path;
 
 use super::database::DatabaseManager;
 use super::error::VantaError;

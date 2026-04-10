@@ -4,10 +4,10 @@ use std::time::Instant;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
-use crate::db::{CollectionSchema, QueryOptions, VantaError};
+use crate::db::CollectionSchema;
 use crate::raft::{RaftOp, RaftResponse};
 use crate::raft::lease::extract_consistency;
-use super::auth_interceptor::{extract_auth, AuthContext};
+use super::auth_interceptor::extract_auth;
 use super::metrics::record_op;
 use super::proto;
 use super::service::{VantaDbServiceImpl, ok_status, docs_response, to_query_options, require_read, require_write, require_admin, vanta_err, raft_propose_or_direct, check_read_permission};

@@ -23,6 +23,7 @@ pub enum TransactionOp {
         db: String,
         collection: String,
         id: String,
+        #[allow(dead_code)]
         patch: Value,
     },
     Delete {
@@ -256,6 +257,7 @@ impl TransactionManager {
     }
 
     /// Begin a transaction (legacy — uses version 0, for backward compat).
+    #[allow(dead_code)]
     pub fn begin(&self) -> String {
         self.begin_at(0)
     }
@@ -460,6 +462,7 @@ impl TransactionManager {
     }
 
     /// List active transaction IDs (for diagnostics).
+    #[allow(dead_code)]
     pub fn active_ids(&self) -> Vec<String> {
         self.active.iter().map(|e| e.key().clone()).collect()
     }

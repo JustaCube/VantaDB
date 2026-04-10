@@ -198,6 +198,7 @@ impl AclManager {
         role_to_permission(role)
     }
 
+    #[allow(dead_code)]
     pub fn list_user_acls(&self) -> Vec<UserAcl> {
         self.engine
             .list_keys(ACL_TABLE)

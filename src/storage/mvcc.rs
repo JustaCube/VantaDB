@@ -54,6 +54,7 @@ pub struct MVCCValue {
     /// Transaction version that logically deleted this (None = live).
     pub deleted_at: Option<u64>,
     /// ID of the transaction that created this version.
+    #[allow(dead_code)]
     pub txn_id: Uuid,
 }
 
@@ -156,6 +157,7 @@ impl MVCCStore {
     }
 
     /// Access the underlying StorageEngine (for table DDL, compaction, etc.).
+    #[allow(dead_code)]
     pub fn engine(&self) -> &StorageEngine {
         &self.engine
     }
@@ -390,6 +392,7 @@ impl MVCCStore {
     }
 
     /// Count live keys in a table at a specific snapshot version.
+    #[allow(dead_code)]
     pub fn count_at(&self, table: &str, snap: Snapshot) -> usize {
         let prefix = table.to_string();
         let mut count = 0;
@@ -543,6 +546,7 @@ impl MVCCStore {
 
 /// Statistics about the MVCC store.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct MVCCStats {
     pub total_chains: usize,
     pub total_versions: usize,
@@ -577,7 +581,6 @@ fn resolve_version(chain: &[MVCCValue], snap_version: u64) -> Option<Arc<[u8]>> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use tempfile::TempDir;
 
     fn test_store() -> (MVCCStore, TempDir) {
