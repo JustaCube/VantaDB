@@ -9,6 +9,9 @@ use uuid::Uuid;
 
 use super::StorageEngine;
 
+const MVCC_META_TABLE: &str = "_vanta_mvcc";
+const MVCC_CLOCK_KEY: &str = "_clock";
+
 // ---- Version Clock ------------------------------------------
 
 /// Global monotonic version clock for MVCC.
@@ -19,8 +22,12 @@ pub struct VersionClock {
 
 impl VersionClock {
     pub fn new() -> Self {
+        Self::new_with(1)
+    }
+
+    pub fn new_with(current: u64) -> Self {
         Self {
-            current: AtomicU64::new(1),
+            current: AtomicU64::new(current.max(1)),
         }
     }
 
@@ -111,13 +118,36 @@ pub struct MVCCStore {
 impl MVCCStore {
     /// Create a new MVCC store wrapping an existing StorageEngine.
     pub fn new(engine: Arc<StorageEngine>) -> Self {
+        if !engine.table_exists(MVCC_META_TABLE) {
+            engine.create_table(MVCC_META_TABLE)
+                .expect("failed to initialize MVCC metadata table");
+        }
+        let clock = Arc::new(VersionClock::new_with(Self::load_persisted_clock(&engine)));
         Self {
             engine,
             chains: DashMap::with_hasher(RandomState::new()),
-            clock: Arc::new(VersionClock::new()),
+            clock,
             active_snapshots: Arc::new(ActiveSnapshots::new()),
             gc_watermark: AtomicU64::new(0),
         }
+    }
+
+    fn load_persisted_clock(engine: &StorageEngine) -> u64 {
+        engine
+            .get(MVCC_META_TABLE, MVCC_CLOCK_KEY)
+            .and_then(|data| {
+                if data.len() == 8 {
+                    Some(u64::from_le_bytes(data.as_ref().try_into().ok()?))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(1)
+    }
+
+    fn persist_clock(&self, version: u64) -> io::Result<()> {
+        self.engine
+            .put(MVCC_META_TABLE, MVCC_CLOCK_KEY, &version.to_le_bytes())
     }
 
     /// Access the version clock.
@@ -246,8 +276,16 @@ impl MVCCStore {
         // Insert at front (newest first)
         chain.insert(0, mv);
 
+        if let Err(err) = self.persist_clock(version) {
+            chain.remove(0);
+            return Err(err);
+        }
+
         // Persist latest to storage engine
-        self.engine.put(table, key, value)?;
+        if let Err(err) = self.engine.put(table, key, value) {
+            chain.remove(0);
+            return Err(err);
+        }
         Ok(version)
     }
 
@@ -292,8 +330,28 @@ impl MVCCStore {
             },
         );
 
+        if let Err(err) = self.persist_clock(version) {
+            chain.remove(0);
+            for mv in chain.iter_mut() {
+                if mv.deleted_at == Some(version) {
+                    mv.deleted_at = None;
+                    break;
+                }
+            }
+            return Err(err);
+        }
+
         // Persist deletion to storage engine
-        self.engine.delete(table, key)?;
+        if let Err(err) = self.engine.delete(table, key) {
+            chain.remove(0);
+            for mv in chain.iter_mut() {
+                if mv.deleted_at == Some(version) {
+                    mv.deleted_at = None;
+                    break;
+                }
+            }
+            return Err(err);
+        }
         Ok(Some(version))
     }
 
@@ -717,5 +775,24 @@ mod tests {
 
         // Non-existent key
         assert!(!store.has_write_after("test", "nope", 0));
+    }
+
+    #[test]
+    fn test_version_clock_persists_across_restart() {
+        let dir = TempDir::new().unwrap();
+        let engine = Arc::new(StorageEngine::open(dir.path()).unwrap());
+        engine.create_table("test").unwrap();
+
+        let store = MVCCStore::new(Arc::clone(&engine));
+        let txn = Uuid::new_v4();
+        let version_before_restart = store.put("test", "k1", b"v1", txn).unwrap();
+        drop(store);
+        drop(engine);
+
+        let reopened_engine = Arc::new(StorageEngine::open(dir.path()).unwrap());
+        let reopened_store = MVCCStore::new(reopened_engine);
+        let version_after_restart = reopened_store.put("test", "k2", b"v2", txn).unwrap();
+
+        assert!(version_after_restart > version_before_restart);
     }
 }
