@@ -15,6 +15,8 @@ const TABLE_SHARD_COUNT: usize = 256;
 
 /// WAL buffer size — 256KB reduces syscalls while keeping memory modest.
 const WAL_BUF_SIZE: usize = 256 * 1024;
+const STORAGE_META_FILE: &str = "_vanta_storage.toml";
+const STORAGE_FORMAT_VERSION: u32 = 1;
 
 // WAL binary format markers
 const WAL_OP_PUT: u8 = 0x01;
@@ -98,6 +100,14 @@ struct TableFile {
     entries: Vec<(String, Vec<u8>)>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct StorageMetadata {
+    format_version: u32,
+    engine: String,
+    wal_record_checksum: String,
+    snapshot_format: String,
+}
+
 impl StorageEngine {
     pub fn open(base_path: &Path) -> io::Result<Self> {
         fs::create_dir_all(base_path)?;
@@ -106,8 +116,13 @@ impl StorageEngine {
             tables: Arc::new(new_map()),
             wal_writers: Arc::new(new_map()),
         };
+        engine.init_metadata()?;
         engine.load_all()?;
         Ok(engine)
+    }
+
+    fn metadata_path(&self) -> PathBuf {
+        self.base_path.join(STORAGE_META_FILE)
     }
 
     fn table_path(&self, table: &str) -> PathBuf {
@@ -116,6 +131,62 @@ impl StorageEngine {
 
     fn wal_path(&self, table: &str) -> PathBuf {
         self.base_path.join(format!("{}.wal", table))
+    }
+
+    fn storage_metadata() -> StorageMetadata {
+        StorageMetadata {
+            format_version: STORAGE_FORMAT_VERSION,
+            engine: "vantadb-storage".to_string(),
+            wal_record_checksum: "crc32c".to_string(),
+            snapshot_format: "bincode-table-v1".to_string(),
+        }
+    }
+
+    fn init_metadata(&self) -> io::Result<()> {
+        let path = self.metadata_path();
+        if path.exists() {
+            let raw = fs::read_to_string(&path)?;
+            let metadata: StorageMetadata = toml::from_str(&raw)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            if metadata != Self::storage_metadata() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "unsupported storage metadata: found format version {}, expected {}",
+                        metadata.format_version, STORAGE_FORMAT_VERSION
+                    ),
+                ));
+            }
+            return Ok(());
+        }
+
+        self.write_metadata_atomically(&Self::storage_metadata())
+    }
+
+    fn write_metadata_atomically(&self, metadata: &StorageMetadata) -> io::Result<()> {
+        let data = toml::to_string(metadata)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let tmp_path = self.metadata_path().with_extension("toml.tmp");
+        fs::write(&tmp_path, data)?;
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&tmp_path)?
+            .sync_all()?;
+        fs::rename(&tmp_path, self.metadata_path())?;
+        self.sync_base_dir()
+    }
+
+    fn sync_base_dir(&self) -> io::Result<()> {
+        match File::open(self.base_path.as_path()) {
+            Ok(dir) => match dir.sync_all() {
+                Ok(()) => Ok(()),
+                Err(err) if matches!(err.kind(), io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported) => Ok(()),
+                Err(err) => Err(err),
+            },
+            Err(err) if matches!(err.kind(), io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported) => Ok(()),
+            Err(err) => Err(err),
+        }
     }
 
     fn load_all(&self) -> io::Result<()> {
@@ -279,6 +350,7 @@ impl StorageEngine {
             .create(true)
             .append(true)
             .open(self.wal_path(table))?;
+        self.sync_base_dir()?;
         let writer = Arc::new(Mutex::new(BufWriter::with_capacity(WAL_BUF_SIZE, file)));
         self.wal_writers
             .insert(table.to_string(), Arc::clone(&writer));
@@ -354,9 +426,7 @@ impl StorageEngine {
             fs::rename(&tmp_path, &snapshot_path)?;
 
             // 5. Fsync the directory
-            if let Ok(dir) = File::open(self.base_path.as_path()) {
-                let _ = dir.sync_all();
-            }
+            let _ = self.sync_base_dir();
         }
 
         // 6. Only NOW safe to remove WAL — snapshot is verified on disk
@@ -364,6 +434,7 @@ impl StorageEngine {
         let wal_path = self.wal_path(table);
         if wal_path.exists() {
             let _ = fs::remove_file(wal_path);
+            let _ = self.sync_base_dir();
         }
         Ok(())
     }
@@ -382,8 +453,19 @@ impl StorageEngine {
     #[inline(always)]
     pub fn put(&self, table: &str, key: &str, value: &[u8]) -> io::Result<()> {
         let t = self.get_or_create_table(table);
-        t.insert(key.to_string(), Arc::from(value));
-        self.wal_append_put(table, key, value)
+        let previous = t.insert(key.to_string(), Arc::from(value));
+        if let Err(err) = self.wal_append_put(table, key, value) {
+            match previous {
+                Some(old) => {
+                    t.insert(key.to_string(), old);
+                }
+                None => {
+                    t.remove(key);
+                }
+            }
+            return Err(err);
+        }
+        Ok(())
     }
 
     /// Zero-copy read: returns Arc refcount bump instead of memcpy.
@@ -394,15 +476,17 @@ impl StorageEngine {
     }
 
     pub fn delete(&self, table: &str, key: &str) -> io::Result<bool> {
-        let existed = self
-            .tables
-            .get(table)
-            .map(|map| map.remove(key).is_some())
-            .unwrap_or(false);
-        if existed {
-            self.wal_append_delete(table, key)?;
+        let Some(map) = self.tables.get(table) else {
+            return Ok(false);
+        };
+        let Some((removed_key, removed_value)) = map.remove(key) else {
+            return Ok(false);
+        };
+        if let Err(err) = self.wal_append_delete(table, key) {
+            map.insert(removed_key, removed_value);
+            return Err(err);
         }
-        Ok(existed)
+        Ok(true)
     }
 
     pub fn list_keys(&self, table: &str) -> Vec<String> {
@@ -417,34 +501,50 @@ impl StorageEngine {
     }
 
     pub fn create_table(&self, table: &str) -> io::Result<()> {
+        let created = !self.tables.contains_key(table);
         self.tables
             .entry(table.to_string())
             .or_insert_with(|| Arc::new(new_table(64)));
-        self.compact(table)
+        if let Err(err) = self.compact(table) {
+            if created {
+                self.tables.remove(table);
+            }
+            return Err(err);
+        }
+        Ok(())
     }
 
     /// Create a table pre-allocated for `capacity` entries with 256 shards.
     pub fn create_table_with_capacity(&self, table: &str, capacity: usize) -> io::Result<()> {
+        let created = !self.tables.contains_key(table);
         self.tables
             .entry(table.to_string())
             .or_insert_with(|| Arc::new(new_table(capacity)));
-        self.compact(table)
+        if let Err(err) = self.compact(table) {
+            if created {
+                self.tables.remove(table);
+            }
+            return Err(err);
+        }
+        Ok(())
     }
 
     pub fn drop_table(&self, table: &str) -> io::Result<bool> {
-        let existed = self.tables.remove(table).is_some();
-        if existed {
-            self.wal_writers.remove(table);
-            let path = self.table_path(table);
-            if path.exists() {
-                fs::remove_file(&path)?;
-            }
-            let wal = self.wal_path(table);
-            if wal.exists() {
-                let _ = fs::remove_file(wal);
-            }
+        if !self.tables.contains_key(table) {
+            return Ok(false);
         }
-        Ok(existed)
+        self.wal_writers.remove(table);
+        let path = self.table_path(table);
+        if path.exists() {
+            fs::remove_file(&path)?;
+        }
+        let wal = self.wal_path(table);
+        if wal.exists() {
+            fs::remove_file(&wal)?;
+        }
+        self.sync_base_dir()?;
+        self.tables.remove(table);
+        Ok(true)
     }
 
     pub fn list_tables(&self) -> Vec<String> {
@@ -493,19 +593,121 @@ impl StorageEngine {
     /// Batch write to memory then single WAL append with fsync (much faster than individual puts).
     pub fn put_batch(&self, table: &str, entries: &[(String, Vec<u8>)]) -> io::Result<()> {
         let t = self.get_or_create_table(table);
+        let mut previous = Vec::with_capacity(entries.len());
         for (k, v) in entries {
-            t.insert(k.clone(), Arc::from(v.as_slice()));
+            previous.push((k.clone(), t.insert(k.clone(), Arc::from(v.as_slice()))));
         }
         // Encode all entries into a single buffer, write in one locked section
         let mut buf = Vec::with_capacity(entries.len() * 128);
         for (k, v) in entries {
             encode_wal_put(&mut buf, k.as_bytes(), v);
         }
-        let writer = self.get_wal_writer(table)?;
+        let writer = match self.get_wal_writer(table) {
+            Ok(writer) => writer,
+            Err(err) => {
+                for (key, old_value) in previous.into_iter().rev() {
+                    match old_value {
+                        Some(old) => {
+                            t.insert(key, old);
+                        }
+                        None => {
+                            t.remove(&key);
+                        }
+                    }
+                }
+                return Err(err);
+            }
+        };
         let mut w = writer.lock();
-        w.write_all(&buf)?;
-        w.flush()?;
-        w.get_ref().sync_data()?;
+        if let Err(err) = (|| -> io::Result<()> {
+            w.write_all(&buf)?;
+            w.flush()?;
+            w.get_ref().sync_data()?;
+            Ok(())
+        })() {
+            for (key, old_value) in previous.into_iter().rev() {
+                match old_value {
+                    Some(old) => {
+                        t.insert(key, old);
+                    }
+                    None => {
+                        t.remove(&key);
+                    }
+                }
+            }
+            return Err(err);
+        }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn test_engine() -> (TempDir, StorageEngine) {
+        let dir = TempDir::new().unwrap();
+        let engine = StorageEngine::open(dir.path()).unwrap();
+        (dir, engine)
+    }
+
+    #[test]
+    fn test_storage_metadata_is_created() {
+        let (dir, _engine) = test_engine();
+        let raw = fs::read_to_string(dir.path().join(STORAGE_META_FILE)).unwrap();
+        let metadata: StorageMetadata = toml::from_str(&raw).unwrap();
+        assert_eq!(metadata, StorageEngine::storage_metadata());
+    }
+
+    #[test]
+    fn test_put_rolls_back_memory_when_wal_open_fails() {
+        let (dir, engine) = test_engine();
+        fs::create_dir(dir.path().join("users.wal")).unwrap();
+
+        let err = engine.put("users", "k1", b"hello");
+        assert!(err.is_err());
+        assert!(engine.get("users", "k1").is_none());
+    }
+
+    #[test]
+    fn test_create_table_rolls_back_on_compaction_failure() {
+        let (dir, engine) = test_engine();
+        fs::create_dir(dir.path().join("users.vdb")).unwrap();
+
+        let err = engine.create_table("users");
+        assert!(err.is_err());
+        assert!(!engine.table_exists("users"));
+    }
+
+    #[test]
+    fn test_restart_recovers_snapshot_and_wal() {
+        let dir = TempDir::new().unwrap();
+        let engine = StorageEngine::open(dir.path()).unwrap();
+        engine.put("users", "alice", b"v1").unwrap();
+        engine.put("users", "bob", b"v2").unwrap();
+        engine.compact("users").unwrap();
+        engine.put("users", "alice", b"v3").unwrap();
+        engine.delete("users", "bob").unwrap();
+        drop(engine);
+
+        let reopened = StorageEngine::open(dir.path()).unwrap();
+        assert_eq!(&*reopened.get("users", "alice").unwrap(), b"v3");
+        assert!(reopened.get("users", "bob").is_none());
+    }
+
+    #[test]
+    fn test_put_batch_rolls_back_memory_when_wal_open_fails() {
+        let (dir, engine) = test_engine();
+        fs::create_dir(dir.path().join("users.wal")).unwrap();
+
+        let entries = vec![
+            ("a".to_string(), b"1".to_vec()),
+            ("b".to_string(), b"2".to_vec()),
+        ];
+        let err = engine.put_batch("users", &entries);
+        assert!(err.is_err());
+        assert!(engine.get("users", "a").is_none());
+        assert!(engine.get("users", "b").is_none());
     }
 }
